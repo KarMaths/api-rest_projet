@@ -1,6 +1,4 @@
-# Contrat de sandboxd — squelette du TP3.
-# Une opération est écrite pour exemple (getSandbox). À vous d'écrire les autres :
-# voir le sujet du TP, partie 1. Vérifiez avec `make lint` après chaque ajout.
+# Contrat de sandboxd — TP2 (création du contrat).
 openapi: 3.1.0
 info:
   title: sandboxd
@@ -12,7 +10,7 @@ info:
     commandes et lit ou écrit des fichiers.
     Toutes les erreurs suivent la RFC 9457 (application/problem+json).
   contact:
-    name: "Binôme : NOM1 / NOM2"   # TODO
+    name: "Binôme : Karl JEAN / Anas Louraibi"  
 servers:
   - url: http://localhost:8000
     description: Développement local
@@ -22,12 +20,110 @@ tags:
   - name: exec
     description: Exécution de commandes
   - name: files
-    description: Lecture et écriture de fichiers
+    description: Lecture et ecriture de fichiers
   - name: health
-    description: Sondes de santé
+    description: Sondes de sante
 
 paths:
-  # TODO : POST /v1/sandboxes (createSandbox), GET /v1/sandboxes (listSandboxes)
+# create sandbx 
+  /v1/sandboxes:
+    post:
+      tags: [sandboxes]
+      operationId: createSandbox
+      summary: Créer une sandbox
+      description: |
+        Dzemarre la creation d'une sandbox à partir d'une image autorisee.
+      parameters:
+        - name: keyd #Idempotency-Key
+          in: header
+          required: false
+          description: Cle choisie par le client.
+          schema:
+            type: string
+            minLength: 8
+            maxLength: 64
+          example: 7c9e6679-7425-40de-944b-e07fc1f90ae7
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SandboxCreate"
+            example:
+              image: python:3.12-slim
+              ttl_seconds: 600
+              limits: {cpus: 0.5, memory_mb: 256}
+      responses:
+        "202":
+          description: Création acceptée, la sandbox est en cours de démarrage.
+          headers:
+            Location:
+              description: URL de la sandbox à consulter.
+              schema: {type: string}
+              example: /v1/sandboxes/sbx-a1b2c3d4
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Sandbox"
+              example:
+                id: sbx-a1b2c3d4
+                image: python:3.12-slim
+                status: pending
+                ttl_seconds: 600
+                limits: {cpus: 0.5, memory_mb: 256}
+                created_at: "2026-10-28T10:00:00Z"
+                expires_at: "2026-10-28T10:10:00Z"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+  
+    # Lister les sandboxes, avec un filtre par état
+    get:
+      tags: [sandboxes]
+      operationId: listSandboxes
+      summary: Lister les sandboxes
+      description: Liste paginée, de la plus récente à la plus ancienne, avec un filtre par état.
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: Ne garder que les sandboxes dans cet état.
+          schema:
+            $ref: "#/components/schemas/SandboxStatus"
+        - name: page_size
+          in: query
+          required: false
+          description: Nombre maximal d'éléments par page.
+          schema: {type: integer, minimum: 1, maximum: 100, default: 20}
+        - name: page_token
+          in: query
+          required: false
+          description: Valeur de `next_page_token` de la page précédente.
+          schema: {type: string}
+      responses:
+        "200":
+          description: Une page de sandboxes.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxList"
+              example:
+                items:
+                  - id: sbx-a1b2c3d4
+                    image: alpine:3.20
+                    status: ready
+                    ttl_seconds: 600
+                    limits: {cpus: 1, memory_mb: 512}
+                    created_at: "2026-10-28T10:00:00Z"
+                    expires_at: "2026-10-28T10:10:00Z"
+                next_page_token: null
+        "400":
+          $ref: "#/components/responses/BadRequest"
 
   /v1/sandboxes/{sandbox_id}:
     parameters:
@@ -40,16 +136,183 @@ paths:
       responses:
         "200":
           description: La sandbox.
+          headers:
+            ETag:
+              description: Version de la ressource, à renvoyer dans If-Match.
+              schema: {type: string}
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Sandbox"
         "404":
           $ref: "#/components/responses/NotFound"
-    # TODO : PATCH (updateSandbox), DELETE (deleteSandbox)
+    
+    # Prolonger la durée de vie (ttl_seconds)
+    patch:
+      tags: [sandboxes]
+      operationId: updateSandbox
+      summary: Prolonger la durée de vie d'une sandbox
+      description: |
+        JSON Merge Patch (RFC 7396) : seuls les champs présents sont modifiés.
+        Avec `If-Match`, la modification n'est appliquée que si la sandbox
+        n'a pas changé depuis la lecture (ETag de `getSandbox`), sinon `412`.
+      parameters:
+        - name: If-Match
+          in: header
+          required: false
+          description: ETag obtenu avec `getSandbox`.
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema:
+              $ref: "#/components/schemas/SandboxPatch"
+            example:
+              ttl_seconds: 1800
+      responses:
+        "200":
+          description: La sandbox après modification.
+          headers:
+            ETag:
+              description: Nouvelle version de la ressource.
+              schema: {type: string}
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Sandbox"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+    
+    # Détruire la sandbox
+    delete:
+      tags: [sandboxes]
+      operationId: deleteSandbox
+      summary: Détruire une sandbox
+      description: Arrête et supprime le conteneur. La sandbox n'existe plus ensuite.
+      responses:
+        "204":
+          description: Sandbox détruite.
+        "404":
+          $ref: "#/components/responses/NotFound"
 
-  # TODO : POST /v1/sandboxes/{sandbox_id}/exec (execCommand)
-  # TODO : GET et PUT /v1/sandboxes/{sandbox_id}/files?path=… (readFile, writeFile)
+  # Exécuter une commande, renvoyer sa sortie
+  /v1/sandboxes/{sandbox_id}/exec:
+    parameters:
+      - $ref: "#/components/parameters/SandboxId"
+    post:
+      tags: [exec]
+      operationId: execCommand
+      summary: Exécuter une commande
+      description: |
+        Exécute la commande de façon synchrone dans `/workspace` et renvoie
+        son résultat. Un code de sortie non nul ou un timeout ne sont pas des
+        erreurs HTTP : la réponse reste `200` et `ExecResult` les décrit.
+        Chaque flux (stdout, stderr) est limité à 1 Mo ; au-delà il est coupé
+        et `truncated` vaut `true`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExecRequest"
+            example:
+              # exit_code: 0
+              cmd: ["python", "-c", "print(1 + 1)"]
+              # stdout: "fichier.txt\n"
+              # stderr: ""
+              timeout_seconds: 5
+      responses:
+        "200":
+          description: La commande s'est exécutée (quel que soit son code de sortie).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecResult"
+              example:
+                exit_code: 0
+                stdout: "2\n"
+                stderr: ""
+                duration_ms: 54
+                timed_out: false
+                truncated: false
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  # Lire un fichier de /workspace
+  /v1/sandboxes/{sandbox_id}/files:
+    parameters:
+      - $ref: "#/components/parameters/SandboxId"
+      - $ref: "#/components/parameters/FilePath"
+    get:
+      tags: [files]
+      operationId: readFile
+      summary: Lire un fichier de /workspace
+      description: |
+        Renvoie le contenu brut du fichier.
+        Fichier absent : `404`. Chemin désignant un dossier, absolu ou
+        contenant `..` : `400`. Sandbox pas encore prête : `409`.
+      responses:
+        "200":
+          description: Contenu du fichier.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+    # Écrire un fichier dans /workspace
+    put:
+      tags: [files]
+      operationId: writeFile
+      summary: Écrire un fichier dans /workspace
+      description: |
+        Cree le fichier ou remplace son contenu. Les dossiers parents doivent
+        exister. 
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "201":
+          description: Fichier créé.
+        "204":
+          description: Fichier existant remplacé.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
 
   /healthz:
     get:
@@ -78,6 +341,19 @@ components:
         type: string
         pattern: "^sbx-[a-z0-9]{8}$"
       example: sbx-a1b2c3d4
+    FilePath:
+      name: path
+      in: query
+      required: true
+      description: |
+        Chemin du fichier, relatif à `/workspace` (exemple : `src/main.py`).
+        Ni absolu, ni segment `..`. Un dossier est refusé.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 4096
+        pattern: "^[^/]"
+      example: hello.py
 
   schemas:
     SandboxStatus:
@@ -122,7 +398,77 @@ components:
         expires_at:
           type: string
           format: date-time
-    # TODO : SandboxCreate, SandboxPatch, SandboxList, ExecRequest, ExecResult
+    SandboxCreate:
+      type: object
+      additionalProperties: false
+      required: [image]
+      properties:
+        image:
+          $ref: "#/components/schemas/Image"
+        ttl_seconds:
+          type: integer
+          minimum: 60
+          maximum: 3600
+          default: 600
+          description: Durée de vie avant destruction automatique.
+        limits:
+          $ref: "#/components/schemas/Limits"
+    SandboxPatch:
+      type: object
+      description: JSON Merge Patch (RFC 7396). Seuls les champs présents sont modifiés.
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        ttl_seconds:
+          type: integer
+          minimum: 60
+          maximum: 3600
+          description: Nouvelle durée de vie, comptée depuis la création.
+    SandboxList:
+      type: object
+      required: [items, next_page_token]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Sandbox"
+        next_page_token:
+          type: [string, "null"]
+          description: Jeton pour la page suivante. `null` s'il n'y en a plus.
+    ExecRequest:
+      type: object
+      additionalProperties: false
+      required: [cmd]
+      properties:
+        cmd:
+          type: array
+          minItems: 1
+          items: {type: string}
+          description: Commande et arguments, sans shell. Pour un shell, passer `["sh", "-c", "..."]`.
+        timeout_seconds:
+          type: integer
+          minimum: 1
+          maximum: 60
+          default: 10
+          description: Durée maximale. Au-delà, la commande est tuée (SIGKILL).
+    ExecResult:
+      type: object
+      required: [exit_code, stdout, stderr, duration_ms, timed_out, truncated]
+      properties:
+        exit_code:
+          type: integer
+          description: Code de sortie du processus. 137 si tué par timeout.
+        stdout: {type: string}
+        stderr: {type: string}
+        duration_ms:
+          type: integer
+          minimum: 0
+        timed_out:
+          type: boolean
+          description: La commande a dépassé `timeout_seconds` et a été tuée.
+        truncated:
+          type: boolean
+          description: stdout ou stderr a dépassé 1 Mo et a été coupé.
     Problem:
       type: object
       description: RFC 9457, Problem Details for HTTP APIs.
@@ -141,9 +487,70 @@ components:
           type: string
 
   responses:
-    NotFound:
-      description: Sandbox introuvable.
+    BadRequest:
+      description: Requête mal formée (JSON invalide, chemin interdit, jeton de page inconnu).
       content:
         application/problem+json:
           schema: {$ref: "#/components/schemas/Problem"}
-    # TODO : une réponse réutilisable par code d'erreur dont vous avez besoin
+          example:
+            type: /errors/invalid-path
+            title: Bad Request
+            status: 400
+            detail: Le chemin ne doit pas contenir "..".
+    NotFound:
+      description: Sandbox ou fichier introuvable.
+      content:
+        application/problem+json:
+          schema: {$ref: "#/components/schemas/Problem"}
+          example:
+            type: /errors/not-found
+            title: Not Found
+            status: 404
+            detail: sbx-a1b2c3d4 n'existe pas
+    Conflict:
+      description: Conflit avec l'état de la ressource (sandbox pas prête, clé d'idempotence réutilisée).
+      content:
+        application/problem+json:
+          schema: {$ref: "#/components/schemas/Problem"}
+          example:
+            type: /errors/not-ready
+            title: Conflict
+            status: 409
+            detail: sbx-a1b2c3d4 n'est pas prête (status pending).
+    PreconditionFailed:
+      description: L'ETag fourni dans If-Match ne correspond plus à la ressource.
+      content:
+        application/problem+json:
+          schema: {$ref: "#/components/schemas/Problem"}
+          example:
+            type: /errors/precondition-failed
+            title: Precondition Failed
+            status: 412
+    PayloadTooLarge:
+      description: Corps trop volumineux.
+      content:
+        application/problem+json:
+          schema: {$ref: "#/components/schemas/Problem"}
+          example:
+            type: /errors/payload-too-large
+            title: Payload Too Large
+            status: 413
+    UnsupportedMediaType:
+      description: Content-Type non accepté par cette opération.
+      content:
+        application/problem+json:
+          schema: {$ref: "#/components/schemas/Problem"}
+          example:
+            type: /errors/unsupported-media-type
+            title: Unsupported Media Type
+            status: 415
+    ValidationError:
+      description: Corps syntaxiquement valide mais refusé (champ inconnu, valeur hors bornes).
+      content:
+        application/problem+json:
+          schema: {$ref: "#/components/schemas/Problem"}
+          example:
+            type: /errors/validation
+            title: Unprocessable Content
+            status: 422
+            detail: "image : valeur non autorisée."
