@@ -1,4 +1,4 @@
-# Contrat de sandboxd — TP2 (création du contrat).
+# Contrat de sandboxd — TP2.
 openapi: 3.1.0
 info:
   title: sandboxd
@@ -10,7 +10,7 @@ info:
     commandes et lit ou écrit des fichiers.
     Toutes les erreurs suivent la RFC 9457 (application/problem+json).
   contact:
-    name: "Binôme : Karl JEAN / Anas Louraibi"  
+    name: "Binôme : Karl JEAN / Anas Louraibi"
 servers:
   - url: http://localhost:8000
     description: Développement local
@@ -20,29 +20,23 @@ tags:
   - name: exec
     description: Exécution de commandes
   - name: files
-    description: Lecture et ecriture de fichiers
+    description: Lecture et écriture de fichiers
   - name: health
-    description: Sondes de sante
+    description: Sondes de santé
 
 paths:
-# create sandbx 
   /v1/sandboxes:
     post:
       tags: [sandboxes]
       operationId: createSandbox
       summary: Créer une sandbox
       description: |
-        Dzemarre la creation d'une sandbox à partir d'une image autorisee.
+        Création asynchrone : la sandbox est renvoyée en pending, puis passe
+        en ready ou failed. On suit son état avec l'adresse dans Location.
+        Même Idempotency-Key et même corps : même réponse 202.
+        Même clé avec un autre corps : 409.
       parameters:
-        - name: keyd #Idempotency-Key
-          in: header
-          required: false
-          description: Cle choisie par le client.
-          schema:
-            type: string
-            minLength: 8
-            maxLength: 64
-          example: 7c9e6679-7425-40de-944b-e07fc1f90ae7
+        - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
         required: true
         content:
@@ -55,12 +49,13 @@ paths:
               limits: {cpus: 0.5, memory_mb: 256}
       responses:
         "202":
-          description: Création acceptée, la sandbox est en cours de démarrage.
+          description: Création acceptée (pending).
           headers:
             Location:
-              description: URL de la sandbox à consulter.
-              schema: {type: string}
-              example: /v1/sandboxes/sbx-a1b2c3d4
+              description: Adresse de la sandbox.
+              schema:
+                type: string
+                example: /v1/sandboxes/sbx-a1b2c3d4
           content:
             application/json:
               schema:
@@ -76,18 +71,17 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/IdempotencyConflict"
         "415":
           $ref: "#/components/responses/UnsupportedMediaType"
         "422":
           $ref: "#/components/responses/ValidationError"
-  
-    # Lister les sandboxes, avec un filtre par état
+
     get:
       tags: [sandboxes]
       operationId: listSandboxes
       summary: Lister les sandboxes
-      description: Liste paginée, de la plus récente à la plus ancienne, avec un filtre par état.
+      description: Liste paginée, avec un filtre par état.
       parameters:
         - name: status
           in: query
@@ -103,7 +97,7 @@ paths:
         - name: page_token
           in: query
           required: false
-          description: Valeur de `next_page_token` de la page précédente.
+          description: Le next_page_token de la page d'avant.
           schema: {type: string}
       responses:
         "200":
@@ -124,6 +118,8 @@ paths:
                 next_page_token: null
         "400":
           $ref: "#/components/responses/BadRequest"
+        "422":
+          $ref: "#/components/responses/ValidationError"
 
   /v1/sandboxes/{sandbox_id}:
     parameters:
@@ -138,7 +134,7 @@ paths:
           description: La sandbox.
           headers:
             ETag:
-              description: Version de la ressource, à renvoyer dans If-Match.
+              description: Version de la sandbox (pour If-Match).
               schema: {type: string}
           content:
             application/json:
@@ -146,21 +142,20 @@ paths:
                 $ref: "#/components/schemas/Sandbox"
         "404":
           $ref: "#/components/responses/NotFound"
-    
-    # Prolonger la durée de vie (ttl_seconds)
+
     patch:
       tags: [sandboxes]
       operationId: updateSandbox
       summary: Prolonger la durée de vie d'une sandbox
       description: |
-        JSON Merge Patch (RFC 7396) : seuls les champs présents sont modifiés.
-        Avec `If-Match`, la modification n'est appliquée que si la sandbox
-        n'a pas changé depuis la lecture (ETag de `getSandbox`), sinon `412`.
+        Modifie ttl_seconds (JSON Merge Patch).
+        Avec If-Match : 412 si la sandbox a changé entre-temps.
+        Sandbox terminée : 409.
       parameters:
         - name: If-Match
           in: header
           required: false
-          description: ETag obtenu avec `getSandbox`.
+          description: L'ETag reçu avec getSandbox.
           schema: {type: string}
       requestBody:
         required: true
@@ -172,10 +167,10 @@ paths:
               ttl_seconds: 1800
       responses:
         "200":
-          description: La sandbox après modification.
+          description: La sandbox modifiée.
           headers:
             ETag:
-              description: Nouvelle version de la ressource.
+              description: Nouvelle version.
               schema: {type: string}
           content:
             application/json:
@@ -185,26 +180,26 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/NotReady"
         "412":
           $ref: "#/components/responses/PreconditionFailed"
         "415":
           $ref: "#/components/responses/UnsupportedMediaType"
         "422":
           $ref: "#/components/responses/ValidationError"
-    
-    # Détruire la sandbox
+
     delete:
       tags: [sandboxes]
       operationId: deleteSandbox
       summary: Détruire une sandbox
-      description: Arrête et supprime le conteneur. La sandbox n'existe plus ensuite.
+      description: Supprime le conteneur et la sandbox. Un 2e DELETE renvoie 404.
       responses:
         "204":
           description: Sandbox détruite.
         "404":
           $ref: "#/components/responses/NotFound"
 
-  # Exécuter une commande, renvoyer sa sortie
   /v1/sandboxes/{sandbox_id}/exec:
     parameters:
       - $ref: "#/components/parameters/SandboxId"
@@ -213,11 +208,9 @@ paths:
       operationId: execCommand
       summary: Exécuter une commande
       description: |
-        Exécute la commande de façon synchrone dans `/workspace` et renvoie
-        son résultat. Un code de sortie non nul ou un timeout ne sont pas des
-        erreurs HTTP : la réponse reste `200` et `ExecResult` les décrit.
-        Chaque flux (stdout, stderr) est limité à 1 Mo ; au-delà il est coupé
-        et `truncated` vaut `true`.
+        Exécute la commande (liste d'arguments, sans shell) et renvoie le résultat.
+        Si la commande échoue ou dépasse son timeout, la réponse reste 200.
+        La sandbox doit être ready, sinon 409.
       requestBody:
         required: true
         content:
@@ -225,14 +218,11 @@ paths:
             schema:
               $ref: "#/components/schemas/ExecRequest"
             example:
-              # exit_code: 0
               cmd: ["python", "-c", "print(1 + 1)"]
-              # stdout: "fichier.txt\n"
-              # stderr: ""
               timeout_seconds: 5
       responses:
         "200":
-          description: La commande s'est exécutée (quel que soit son code de sortie).
+          description: Résultat de la commande.
           content:
             application/json:
               schema:
@@ -249,13 +239,12 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/NotReady"
         "415":
           $ref: "#/components/responses/UnsupportedMediaType"
         "422":
           $ref: "#/components/responses/ValidationError"
 
-  # Lire un fichier de /workspace
   /v1/sandboxes/{sandbox_id}/files:
     parameters:
       - $ref: "#/components/parameters/SandboxId"
@@ -265,9 +254,9 @@ paths:
       operationId: readFile
       summary: Lire un fichier de /workspace
       description: |
-        Renvoie le contenu brut du fichier.
-        Fichier absent : `404`. Chemin désignant un dossier, absolu ou
-        contenant `..` : `400`. Sandbox pas encore prête : `409`.
+        Renvoie le contenu du fichier.
+        Dossier, chemin absolu ou .. : 400. Fichier absent : 404.
+        Sandbox pas prête : 409.
       responses:
         "200":
           description: Contenu du fichier.
@@ -281,16 +270,16 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/NotReady"
 
-    # Écrire un fichier dans /workspace
     put:
       tags: [files]
       operationId: writeFile
       summary: Écrire un fichier dans /workspace
       description: |
-        Cree le fichier ou remplace son contenu. Les dossiers parents doivent
-        exister. 
+        Crée le fichier (201) ou le remplace (204). Le chemin est relatif à /workspace.
+        Dossier, chemin absolu ou .. : 400. Dossier parent absent : 404.
+        Sandbox pas prête : 409. Fichier trop gros : 413.
       requestBody:
         required: true
         content:
@@ -302,13 +291,13 @@ paths:
         "201":
           description: Fichier créé.
         "204":
-          description: Fichier existant remplacé.
+          description: Fichier remplacé.
         "400":
           $ref: "#/components/responses/BadRequest"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/NotReady"
         "413":
           $ref: "#/components/responses/PayloadTooLarge"
         "415":
@@ -345,19 +334,28 @@ components:
       name: path
       in: query
       required: true
-      description: |
-        Chemin du fichier, relatif à `/workspace` (exemple : `src/main.py`).
-        Ni absolu, ni segment `..`. Un dossier est refusé.
+      description: Chemin relatif à /workspace (ex. src/main.py).
       schema:
         type: string
         minLength: 1
         maxLength: 4096
         pattern: "^[^/]"
       example: hello.py
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Clé choisie par le client pour ne pas créer deux fois la même sandbox.
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 64
+      example: 7c9e6679-7425-40de-944b-e07fc1f90ae7
 
   schemas:
     SandboxStatus:
       type: string
+      description: pending à la création, puis ready ou failed. terminated une fois expirée.
       enum: [pending, ready, failed, terminated]
     Image:
       type: string
@@ -410,12 +408,11 @@ components:
           minimum: 60
           maximum: 3600
           default: 600
-          description: Durée de vie avant destruction automatique.
+          description: Durée de vie en secondes.
         limits:
           $ref: "#/components/schemas/Limits"
     SandboxPatch:
       type: object
-      description: JSON Merge Patch (RFC 7396). Seuls les champs présents sont modifiés.
       additionalProperties: false
       minProperties: 1
       properties:
@@ -423,7 +420,7 @@ components:
           type: integer
           minimum: 60
           maximum: 3600
-          description: Nouvelle durée de vie, comptée depuis la création.
+          description: Nouvelle durée de vie.
     SandboxList:
       type: object
       required: [items, next_page_token]
@@ -434,7 +431,7 @@ components:
             $ref: "#/components/schemas/Sandbox"
         next_page_token:
           type: [string, "null"]
-          description: Jeton pour la page suivante. `null` s'il n'y en a plus.
+          description: null quand il n'y a plus de page.
     ExecRequest:
       type: object
       additionalProperties: false
@@ -444,20 +441,20 @@ components:
           type: array
           minItems: 1
           items: {type: string}
-          description: Commande et arguments, sans shell. Pour un shell, passer `["sh", "-c", "..."]`.
+          description: Commande et arguments, sans shell.
         timeout_seconds:
           type: integer
           minimum: 1
           maximum: 60
           default: 10
-          description: Durée maximale. Au-delà, la commande est tuée (SIGKILL).
+          description: Temps max, ensuite la commande est arrêtée.
     ExecResult:
       type: object
       required: [exit_code, stdout, stderr, duration_ms, timed_out, truncated]
       properties:
         exit_code:
           type: integer
-          description: Code de sortie du processus. 137 si tué par timeout.
+          description: Code de sortie (137 si arrêtée par le timeout).
         stdout: {type: string}
         stderr: {type: string}
         duration_ms:
@@ -465,10 +462,10 @@ components:
           minimum: 0
         timed_out:
           type: boolean
-          description: La commande a dépassé `timeout_seconds` et a été tuée.
+          description: Commande arrêtée car trop longue.
         truncated:
           type: boolean
-          description: stdout ou stderr a dépassé 1 Mo et a été coupé.
+          description: Sortie coupée au-delà de 1 Mo.
     Problem:
       type: object
       description: RFC 9457, Problem Details for HTTP APIs.
@@ -488,7 +485,7 @@ components:
 
   responses:
     BadRequest:
-      description: Requête mal formée (JSON invalide, chemin interdit, jeton de page inconnu).
+      description: Requête mal formée.
       content:
         application/problem+json:
           schema: {$ref: "#/components/schemas/Problem"}
@@ -498,17 +495,27 @@ components:
             status: 400
             detail: Le chemin ne doit pas contenir "..".
     NotFound:
-      description: Sandbox ou fichier introuvable.
+      description: Sandbox ou fichier introuvable (le detail dit lequel).
       content:
         application/problem+json:
           schema: {$ref: "#/components/schemas/Problem"}
-          example:
-            type: /errors/not-found
-            title: Not Found
-            status: 404
-            detail: sbx-a1b2c3d4 n'existe pas
-    Conflict:
-      description: Conflit avec l'état de la ressource (sandbox pas prête, clé d'idempotence réutilisée).
+          examples:
+            sandbox:
+              summary: Sandbox absente
+              value:
+                type: /errors/not-found
+                title: Not Found
+                status: 404
+                detail: sbx-a1b2c3d4 n'existe pas.
+            fichier:
+              summary: Fichier absent
+              value:
+                type: /errors/file-not-found
+                title: Not Found
+                status: 404
+                detail: /workspace/main.py n'existe pas.
+    NotReady:
+      description: La sandbox n'est pas prête, ou est terminée.
       content:
         application/problem+json:
           schema: {$ref: "#/components/schemas/Problem"}
@@ -517,8 +524,18 @@ components:
             title: Conflict
             status: 409
             detail: sbx-a1b2c3d4 n'est pas prête (status pending).
+    IdempotencyConflict:
+      description: Idempotency-Key déjà utilisée avec un autre corps.
+      content:
+        application/problem+json:
+          schema: {$ref: "#/components/schemas/Problem"}
+          example:
+            type: /errors/idempotency-conflict
+            title: Conflict
+            status: 409
+            detail: Cette clé a déjà servi pour une autre requête.
     PreconditionFailed:
-      description: L'ETag fourni dans If-Match ne correspond plus à la ressource.
+      description: La sandbox a changé depuis la lecture (If-Match).
       content:
         application/problem+json:
           schema: {$ref: "#/components/schemas/Problem"}
@@ -536,7 +553,7 @@ components:
             title: Payload Too Large
             status: 413
     UnsupportedMediaType:
-      description: Content-Type non accepté par cette opération.
+      description: Content-Type non accepté.
       content:
         application/problem+json:
           schema: {$ref: "#/components/schemas/Problem"}
@@ -545,7 +562,7 @@ components:
             title: Unsupported Media Type
             status: 415
     ValidationError:
-      description: Corps syntaxiquement valide mais refusé (champ inconnu, valeur hors bornes).
+      description: Valeur interdite (image, bornes, champ inconnu).
       content:
         application/problem+json:
           schema: {$ref: "#/components/schemas/Problem"}
