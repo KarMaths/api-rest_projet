@@ -62,16 +62,27 @@ def create_container(image: str, cpus: float, memory_mb: int, labels: dict[str, 
     """POST /containers/create, puis /start. Renvoie l'identifiant du conteneur.
 
     Le conteneur reste vivant (sleep infinity) et travaille dans /workspace.
-    Le durcissement (réseau coupé, utilisateur non root…) viendra au TP6.
+    Durci (bloc D) : réseau coupé, utilisateur 1000, racine en lecture seule,
+    capabilities retirées, 64 processus au plus, no-new-privileges.
     """
     body = {
         "Image": image,
         "Cmd": ["sleep", "infinity"],
         "WorkingDir": WORKSPACE,
         "Labels": labels,
+        "User": "1000:1000",                       # pas root
         "HostConfig": {
             "NanoCpus": int(cpus * 1_000_000_000),
             "Memory": memory_mb * 1024 * 1024,
+            "NetworkMode": "none",                 # réseau coupé
+            "ReadonlyRootfs": True,                # système de fichiers en lecture seule…
+            "Tmpfs": {                             # …sauf /workspace et /tmp
+                WORKSPACE: "rw,exec,nosuid,size=64m,uid=1000,gid=1000,mode=0755",
+                "/tmp": "rw,noexec,nosuid,size=64m,mode=1777",
+            },
+            "CapDrop": ["ALL"],                    # aucune capability
+            "SecurityOpt": ["no-new-privileges"],  # pas d'élévation (setuid…)
+            "PidsLimit": 64,                       # fork bomb bloquée
         },
     }
     r = _client.post("/containers/create", json=body)

@@ -1,54 +1,68 @@
-# sandboxd — starter kit
+# sandboxd
 
-Point de départ du projet fil rouge. Sujets : distribués en cours (projet sandboxd, TP du 28/10).
+API REST qui crée, pilote et détruit des sandboxes (conteneurs Docker isolés).
+Binôme : Karl JEAN / Anas Louraibi. Le contrat fait foi : `openapi.yaml`.
 
-## Prérequis
+## Installer et lancer
 
-- Node 18 ou plus (pour `npx` : Spectral, Prism, Redocly)
-- Python 3.11 ou plus
-- Docker, et l'accès à son socket
-
-## Démarrer
+Prérequis : Python 3.11+, Node 18+, Docker (sous Windows : WSL 2 + Docker Desktop).
 
 ```bash
-make lint      # le contrat est valide
-make install   # dépendances Python dans .venv
-make run       # sandboxd sur http://localhost:8000
-curl localhost:8000/healthz
+cp .env.example .env     # puis remplir les secrets (voir ci-dessous)
+make install
+make run                 # sandboxd sur http://localhost:8000
 ```
 
-**macOS (Docker Desktop, OrbStack) :** le socket n'est pas toujours dans `/var/run/docker.sock`. Trouvez-le, puis passez-le à `make run` :
-
-```bash
-docker context inspect --format '{{.Endpoints.docker.Host}}'
-make run DOCKER_SOCKET=$HOME/.orbstack/run/docker.sock
-```
-
-**Avant le TP4**, téléchargez les images une fois (sinon la première création est lente) :
-
-```bash
-docker pull python:3.12-slim && docker pull node:22-slim && docker pull alpine:3.20
-```
-
-## Commandes
+Générer des secrets : `python3 -c "import secrets; print(secrets.token_hex(32))"`
 
 | Commande | Rôle |
 |---|---|
-| `make lint` | Vérifie le contrat avec Spectral et les règles du cours (`.spectral.yaml`) |
-| `make mock` | Simule l'API à partir du contrat, avec Prism, sur le port 4010 |
-| `make docs` | Génère la documentation HTML du contrat (`docs.html`) |
-| `make run` | Lance sandboxd, rechargé à chaque modification |
-| `make test-contract` | Rejoue le contrat contre sandboxd, avec Schemathesis (sandboxd doit tourner) |
-| `make clean` | Supprime les conteneurs créés par sandboxd |
+| `make lint` | vérifie le contrat |
+| `make test-contract` | Schemathesis contre sandboxd (sandboxd doit tourner) |
+| `make flaky` | API capricieuse du TP4, port 8001 |
+| `make receiver` | récepteur de webhooks, port 9000 |
+| `make test-webhooks` | tests de signature des webhooks |
+| `make clean` | supprime les conteneurs créés par sandboxd |
 
-## Ce qui est fourni
+## Un exemple curl par opération
 
-| Fichier | Contenu |
-|---|---|
-| `openapi.yaml` | Le squelette du contrat : schémas de base, une opération d'exemple |
-| `.spectral.yaml` | Les règles du cours : `/v1`, erreurs en problem+json, au moins une 4xx par opération, snake_case |
-| `app/docker.py` | Le client de l'API Docker Engine : créer, exécuter, lire et écrire des fichiers, supprimer |
-| `app/errors.py` | Les erreurs au format problem+json : `raise Problem(409, "not-ready", "…")` |
-| `app/main.py` | Le squelette de l'API : stockage en mémoire, création en tâche de fond, `getSandbox` d'exemple |
+```bash
+K="Authorization: Bearer $SANDBOXD_API_KEY"
+# createSandbox -> 202 + Location
+curl -i -X POST localhost:8000/v1/sandboxes -H "$K" -H 'Content-Type: application/json' -d '{"image":"python:3.12-slim"}'
+# listSandboxes
+curl -s "localhost:8000/v1/sandboxes?status=ready&page_size=20" -H "$K"
+# getSandbox
+curl -i localhost:8000/v1/sandboxes/sbx-a1b2c3d4 -H "$K"
+# updateSandbox (If-Match facultatif)
+curl -X PATCH localhost:8000/v1/sandboxes/sbx-a1b2c3d4 -H "$K" -H 'Content-Type: application/merge-patch+json' -d '{"ttl_seconds":1800}'
+# deleteSandbox -> 204
+curl -X DELETE localhost:8000/v1/sandboxes/sbx-a1b2c3d4 -H "$K"
+# createAgentToken -> 201
+curl -X POST localhost:8000/v1/sandboxes/sbx-a1b2c3d4/tokens -H "$K"
+# execCommand
+curl -X POST localhost:8000/v1/sandboxes/sbx-a1b2c3d4/exec -H "$K" -H 'Content-Type: application/json' -d '{"cmd":["ls","-la"],"timeout_seconds":5}'
+# writeFile -> 201 / 204
+curl -X PUT "localhost:8000/v1/sandboxes/sbx-a1b2c3d4/files?path=hello.py" -H "$K" -H 'Content-Type: application/octet-stream' --data-binary 'print("bonjour")'
+# readFile
+curl "localhost:8000/v1/sandboxes/sbx-a1b2c3d4/files?path=hello.py" -H "$K"
+# santé et métriques
+curl localhost:8000/healthz; curl localhost:8000/readyz; curl localhost:8000/metrics
+```
 
-Le contrat fait foi : FastAPI ne publie pas sa propre documentation.
+## Client sbx (TP4)
+
+```bash
+export SANDBOXD_URL=http://localhost:8000 SANDBOXD_API_KEY=...
+.venv/bin/python -m client.sbx create --image alpine:3.20 --wait
+.venv/bin/python -m client.sbx exec sbx-a1b2c3d4 -- ls -la
+.venv/bin/python -m client.sbx ls
+.venv/bin/python -m client.sbx rm sbx-a1b2c3d4
+```
+
+## Sécurité (résumé)
+
+- Opérateur : clé d'API (`SANDBOXD_API_KEY`). Agent : jeton JWT de 15 min limité à une sandbox ; sur une autre sandbox il reçoit 404, sur une route d'opérateur 403.
+- Conteneurs : réseau coupé, utilisateur 1000, racine en lecture seule (sauf /workspace et /tmp), aucune capability, 64 processus au plus, no-new-privileges.
+- Quota de sandboxes actives, expiration automatique (terminated), chemins de fichiers vérifiés, journal d'audit `audit.log`.
+- `/metrics` est hors du contrat : c'est un point de supervision (format Prometheus), pas une route métier.

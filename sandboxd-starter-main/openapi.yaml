@@ -11,6 +11,9 @@ info:
     Toutes les erreurs suivent la RFC 9457 (application/problem+json).
   contact:
     name: "Binôme : Karl JEAN / Anas Louraibi"
+security:
+  - OperatorKey: []
+  - AgentToken: []
 servers:
   - url: http://localhost:8000
     description: Développement local
@@ -21,6 +24,8 @@ tags:
     description: Exécution de commandes
   - name: files
     description: Lecture et écriture de fichiers
+  - name: auth
+    description: Jetons d'agent
   - name: health
     description: Sondes de santé
 
@@ -48,6 +53,12 @@ paths:
               ttl_seconds: 600
               limits: {cpus: 0.5, memory_mb: 256}
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "202":
           description: Création acceptée (pending).
           headers:
@@ -100,6 +111,10 @@ paths:
           description: Le next_page_token de la page d'avant.
           schema: {type: string}
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "200":
           description: Une page de sandboxes.
           content:
@@ -130,6 +145,8 @@ paths:
       summary: Consulter une sandbox
       description: Renvoie l'état courant de la sandbox.
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: La sandbox.
           headers:
@@ -166,6 +183,10 @@ paths:
             example:
               ttl_seconds: 1800
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "200":
           description: La sandbox modifiée.
           headers:
@@ -195,10 +216,42 @@ paths:
       summary: Détruire une sandbox
       description: Supprime le conteneur et la sandbox. Un 2e DELETE renvoie 404.
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "204":
           description: Sandbox détruite.
         "404":
           $ref: "#/components/responses/NotFound"
+
+  /v1/sandboxes/{sandbox_id}/tokens:
+    parameters:
+      - $ref: "#/components/parameters/SandboxId"
+    post:
+      tags: [auth]
+      operationId: createAgentToken
+      summary: Créer un jeton d'agent
+      description: |
+        Réservé à l'opérateur. Le jeton (JWT, 15 minutes) ne donne accès qu'à
+        cette sandbox : lecture, exec et fichiers. Sur une autre sandbox : 404.
+      security:
+        - OperatorKey: []
+      responses:
+        "201":
+          description: Le jeton.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentToken"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/NotReady"
 
   /v1/sandboxes/{sandbox_id}/exec:
     parameters:
@@ -221,6 +274,8 @@ paths:
               cmd: ["python", "-c", "print(1 + 1)"]
               timeout_seconds: 5
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Résultat de la commande.
           content:
@@ -258,6 +313,8 @@ paths:
         Dossier, chemin absolu ou .. : 400. Fichier absent : 404.
         Sandbox pas prête : 409.
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Contenu du fichier.
           content:
@@ -288,6 +345,8 @@ paths:
               type: string
               format: binary
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "201":
           description: Fichier créé.
         "204":
@@ -307,6 +366,7 @@ paths:
     get:
       tags: [health]
       operationId: getHealth
+      security: []
       summary: Le processus est-il vivant ?
       description: Ne vérifie aucune dépendance.
       responses:
@@ -319,7 +379,37 @@ paths:
                 properties:
                   status: {type: string, enum: [ok]}
 
+  /readyz:
+    get:
+      tags: [health]
+      operationId: getReadiness
+      summary: sandboxd peut-il servir ?
+      description: Vérifie que Docker répond. Sinon 503.
+      security: []
+      responses:
+        "200":
+          description: Prêt.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: {type: string, enum: [ready]}
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
 components:
+  securitySchemes:
+    OperatorKey:
+      type: http
+      scheme: bearer
+      description: Clé de l'opérateur (variable SANDBOXD_API_KEY).
+    AgentToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Jeton d'agent, 15 minutes, limité à une sandbox.
+
   parameters:
     SandboxId:
       name: sandbox_id
@@ -466,6 +556,13 @@ components:
         truncated:
           type: boolean
           description: Sortie coupée au-delà de 1 Mo.
+    AgentToken:
+      type: object
+      required: [token, sandbox_id, expires_at]
+      properties:
+        token: {type: string}
+        sandbox_id: {type: string, pattern: "^sbx-[a-z0-9]{8}$"}
+        expires_at: {type: string, format: date-time}
     Problem:
       type: object
       description: RFC 9457, Problem Details for HTTP APIs.
@@ -484,6 +581,36 @@ components:
           type: string
 
   responses:
+    Unauthorized:
+      description: Clé ou jeton absent, invalide ou expiré.
+      headers:
+        WWW-Authenticate:
+          schema: {type: string}
+      content:
+        application/problem+json:
+          schema: {$ref: "#/components/schemas/Problem"}
+          example: {type: /errors/unauthorized, title: Unauthorized, status: 401}
+    Forbidden:
+      description: Réservé à l'opérateur (un jeton d'agent ne suffit pas).
+      content:
+        application/problem+json:
+          schema: {$ref: "#/components/schemas/Problem"}
+          example: {type: /errors/forbidden, title: Forbidden, status: 403}
+    TooManyRequests:
+      description: Quota de sandboxes actives atteint. Réessayer après Retry-After.
+      headers:
+        Retry-After:
+          schema: {type: integer}
+      content:
+        application/problem+json:
+          schema: {$ref: "#/components/schemas/Problem"}
+          example: {type: /errors/quota-exceeded, title: Too Many Requests, status: 429}
+    ServiceUnavailable:
+      description: Docker ne répond pas.
+      content:
+        application/problem+json:
+          schema: {$ref: "#/components/schemas/Problem"}
+          example: {type: /errors/docker-unavailable, title: Service Unavailable, status: 503}
     BadRequest:
       description: Requête mal formée.
       content:
